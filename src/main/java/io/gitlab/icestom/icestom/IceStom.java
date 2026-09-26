@@ -189,20 +189,19 @@ public class IceStom {
             default -> throw new RuntimeException("Unknown database type: " + config.database.type);
         };
 
+        pluginManager = new PluginManager(Path.of("plugins"));
+        pluginManager.loadPlugins();
+
         if (registerDefaultInterface) {
             InterfaceManager.register(TimeTrialingInstance.class, new VanillaInterface());
             InterfaceManager.register(RaceStage.class, new VanillaInterface());
             InterfaceManager.register(IceStom.class, new VanillaInterface());
         }
 
-        interfaceHolder = getHolder(IceStom.class, this);
-
         GlobalEventHandler globalEventHandler = MinecraftServer.getGlobalEventHandler();
-
-        pluginManager = new PluginManager(Path.of("plugins"));
-        pluginManager.loadPlugins();
-
         globalEventHandler.addChild(pluginManager.eventNode());
+
+        interfaceHolder = getHolder(IceStom.class, this);
 
         globalEventHandler.addChild(openBoatUtilsManager.eventNode());
         globalEventHandler.addChild(perfHud.eventNode());
