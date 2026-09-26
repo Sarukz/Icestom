@@ -10,6 +10,7 @@ import java.text.DecimalFormat;
 
 public class TextFormatter {
     private static final DecimalFormat DECIMAL_FORMAT = new DecimalFormat("00.000");
+    private static final DecimalFormat DECIMAL_FORMAT_NO_THING = new DecimalFormat("0.000");
 
     private static final char[] ICESTOM_LOGO_CHAR = { '★', '◆', '●', '⬩', '·' };
     public static final int[] ICESTOM_LOGO_COLOR = { 0x9CC9FC, 0x84BBFB, 0x6BAEFA, 0x53A0F9, 0x3A93F8 };
@@ -21,7 +22,7 @@ public class TextFormatter {
         if (minutes > 0) {
             return Component.text(String.format("%d:%s", minutes, DECIMAL_FORMAT.format(seconds)));
         }
-        return Component.text(DECIMAL_FORMAT.format(seconds));
+        return Component.text(DECIMAL_FORMAT_NO_THING.format(seconds));
     }
 
     public static Component getTimeRounded(long ms) {
