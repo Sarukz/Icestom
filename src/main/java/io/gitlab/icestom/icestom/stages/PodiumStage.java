@@ -7,7 +7,7 @@ import io.gitlab.icestom.icestom.event.stage.InvalidStageArgumentsException;
 import io.gitlab.icestom.icestom.event.event.Result;
 import io.gitlab.icestom.icestom.event.lua.ParticipantStore;
 import io.gitlab.icestom.icestom.instance.TrackInstance;
-import io.gitlab.icestom.icestom.track.TickMovement;
+import io.gitlab.icestom.icestom.track.PlayerMovement;
 import io.gitlab.icestom.icestom.track.Track;
 import io.gitlab.icestom.icestom.track.library.TrackLibrary;
 import net.minestom.server.MinecraftServer;
@@ -61,9 +61,7 @@ public class PodiumStage extends TrackInstance implements EventStage {
     }
 
     @Override
-    protected void onPlayerMovements(Map<Player, TickMovement> movements, Map<Player, Set<String>> inside_tags, Map<Player, Map<String, Long>> crossed_triggers) {
-
-    }
+    protected void handleMovements(List<TickLocation> movements) {}
 
     @Override
     protected boolean shouldTrackPlayer(Player player) {

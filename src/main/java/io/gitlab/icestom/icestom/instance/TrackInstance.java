@@ -4,16 +4,16 @@ import io.github.openboatutils.protocol.OBUPacket;
 import io.github.openboatutils.protocol.channels.OBUContextPacket;
 import io.github.openboatutils.protocol.channels.OBUSettingsPacket;
 import io.gitlab.icestom.icestom.IceStom;
+import io.gitlab.icestom.icestom.entity.Boat;
 import io.gitlab.icestom.icestom.entity.IceStomPlayer;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLap;
 import io.gitlab.icestom.icestom.track.Track;
-import io.gitlab.icestom.icestom.track.TickMovement;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
 import io.gitlab.icestom.icestom.track.colliders.InsideCollider;
 import io.gitlab.icestom.icestom.track.library.TrackLibrary;
+import io.gitlab.icestom.icestom.util.BatchQueue;
 import net.kyori.adventure.nbt.ListBinaryTag;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.coordinate.Vec;
 import net.minestom.server.entity.Entity;
@@ -23,16 +23,14 @@ import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
 import net.minestom.server.event.player.PlayerPacketEvent;
 import net.minestom.server.instance.LightingChunk;
-import net.minestom.server.network.packet.client.common.ClientPongPacket;
 import net.minestom.server.network.packet.client.play.ClientVehicleMovePacket;
-import net.minestom.server.network.packet.server.common.PingPacket;
-import org.jetbrains.annotations.Nullable;
 import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static io.gitlab.icestom.icestom.openboatutils.OpenBoatUtilsManager.writePacket;
 import static io.gitlab.icestom.icestom.util.DisplayEntityConverter.*;
@@ -45,7 +43,9 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
     protected final Track track;
     private final TrackLibrary.Ticket ticket;
 
-    private final Map<Player, Vec> lastTickPositions = new HashMap<>();
+    private final BatchQueue<TickLocation> movementBatchQueue = new BatchQueue<>();
+    private final Map<UUID, Vec> lastTickPositions = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> ticks = new ConcurrentHashMap<>();
 
     private final Set<String> subscribedRegions = new HashSet<>();
     private final Set<String> subscribedTriggers = new HashSet<>();
@@ -86,6 +86,27 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
                 entity.setInstance(this, new Pos(x, y, z));
             });
         });
+
+        eventNode().addListener(PlayerPacketEvent.class, event -> {
+            final Player player = event.getPlayer();
+
+            if (!shouldTrackPlayer(player)) return;
+            if(!(player.getVehicle() instanceof Boat)) return;
+            if (!(event.getPacket() instanceof ClientVehicleMovePacket(Pos position, boolean onGround))) return;
+
+            final UUID uuid = player.getUuid();
+
+            int tick = ticks.merge(uuid, 1, Integer::sum);
+
+            log.info("{} {}", player.getUsername(), tick);
+
+            movementBatchQueue.add(new TickLocation(
+                    player.getUuid(),
+                    tick,
+                    position.asVec(),
+                    position.yaw()
+            ));
+        });
     }
 
     @Override
@@ -93,55 +114,18 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
         return getInstanceContainer().getDimensionName();
     }
 
+    public long getPlayerTick(UUID player) {
+        return ticks.getOrDefault(player, 0);
+    }
+
     @Override
     public void tick(long time) {
         super.tick(time);
 
-        Map<Player, TickMovement> movementMap = new HashMap<>();
+        if (!movementBatchQueue.isEmpty()) {
+            List<TickLocation> movements = movementBatchQueue.drain();
 
-        for (Player player : getPlayers()) {
-            if (!shouldTrackPlayer(player)) {
-                lastTickPositions.remove(player);
-                continue;
-            }
-
-            Vec current = player.getPosition().asVec();
-            @Nullable Vec last = lastTickPositions.get(player);
-
-            movementMap.put(player, new TickMovement(last, current));
-
-            lastTickPositions.put(player, current);
-        }
-
-        Map<Player, Set<String>> inside_tags = new HashMap<>();
-        Map<Player, Map<String, Long>> crossed_triggers = new HashMap<>();
-
-        // TODO: can probably micro-optimise this by avoiding redundant checks on region tags a player is already in
-
-        var regions = track.getRegions();
-        for (InsideCollider watchingRegion : watchingRegions) {
-            for (Player player : watchingRegion.detectInside(movementMap)) {
-                inside_tags.computeIfAbsent(player, _ -> new HashSet<>()).addAll(regions.get(watchingRegion));
-            }
-        }
-
-        var triggers = track.getTriggers();
-        for (CrossCollider watchingTrigger : watchingTriggers) {
-            watchingTrigger.detectCrosses(movementMap).forEach((player, delta) -> {
-                Map<String, Long> crosses = crossed_triggers.computeIfAbsent(player, _ -> new HashMap<>());
-
-                triggers.get(watchingTrigger).forEach(string -> {
-                    crosses.put(string, delta);
-                });
-            });
-        }
-
-        onPlayerMovements(movementMap, inside_tags, crossed_triggers);
-
-        for (Player player : getPlayers()) {
-            if (shouldTrackPlayer(player)) {
-                player.sendPacket(new PingPacket((int) getWorldAge()));
-            }
+            handleMovements(movements);
         }
     }
 
@@ -176,7 +160,7 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
         } catch (IOException _) {}
     }
 
-    protected abstract void onPlayerMovements(Map<Player, TickMovement> movements, Map<Player, Set<String>> inside_tags, Map<Player, Map<String, Long>> crossed_triggers);
+    protected abstract void handleMovements(List<TickLocation> movements);
     protected abstract boolean shouldTrackPlayer(Player player);
 
     public TrackLibrary.Ticket getTicket() {
@@ -254,4 +238,11 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
             instance.createBoat(player, reset_point);
         }
     }
+
+    public record TickLocation(
+            UUID player,
+            long tick,
+            Vec pos,
+            float yaw
+    ) {}
 }

@@ -224,7 +224,9 @@ public class VanillaInterface implements InterfaceProvider {
             final Player player = event.getPlayer();
             final TimeTrialingInstance instance = event.getInstance();
 
-            Component actionBar = event.getLap().getActionBar(instance.getWorldAge());
+            long tick = instance.getPlayerTick(player.getUuid());
+
+            Component actionBar = event.getLap().getActionBar(tick);
 
             player.sendActionBar(actionBar);
         }
@@ -385,7 +387,8 @@ public class VanillaInterface implements InterfaceProvider {
             final RaceStage.RaceParticipant racer = event.getRacer();
             final @NotNull RaceStage instance = event.getInstance();
             final RaceLeaderboard<RaceLeaderboardRow> leaderboard = instance.getRaceLeaderboard();
-            long worldAge = instance.getWorldAge();
+
+            long tick = instance.getWorldAge();
 
             TimedLap lap = racer.getCurrentLap();
 
@@ -400,7 +403,7 @@ public class VanillaInterface implements InterfaceProvider {
             text.append(Component.text(" "));
             text.append(Component.text(Math.max(0, racer.getCompletedLapCount()) + "/" + instance.getTotalLaps()));
             text.append(Component.text(" "));
-            text.append(TextFormatter.getTimeRounded(lap.getCurrentTime(worldAge)).color(NamedTextColor.YELLOW));
+            text.append(TextFormatter.getTimeRounded(lap.getCurrentTime(tick)).color(NamedTextColor.YELLOW));
 
             if (racer.getCompletedLapCount() > 0) {
                 text.append(Component.text(" - "));

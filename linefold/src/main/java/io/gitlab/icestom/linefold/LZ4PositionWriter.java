@@ -37,6 +37,7 @@ public final class LZ4PositionWriter extends AbstractLZ4PositionWriter {
 
         long[] prev = prevByStream.computeIfAbsent(streamId, k -> new long[3]);
         long d1, d2, d3;
+
         synchronized (prev) {
             d1 = v1 ^ prev[0];
             d2 = v2 ^ prev[1];
