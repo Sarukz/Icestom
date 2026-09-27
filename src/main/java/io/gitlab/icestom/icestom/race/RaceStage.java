@@ -4,7 +4,11 @@ import io.gitlab.icestom.icestom.IceStom;
 import io.gitlab.icestom.icestom.entity.Boat;
 import io.gitlab.icestom.icestom.entity.GridBoatHolder;
 import io.gitlab.icestom.icestom.event.*;
+import io.gitlab.icestom.icestom.event.event.EventParticipant;
+import io.gitlab.icestom.icestom.event.event.Result;
 import io.gitlab.icestom.icestom.event.lua.ParticipantStore;
+import io.gitlab.icestom.icestom.event.stage.EventStage;
+import io.gitlab.icestom.icestom.event.stage.InvalidStageArgumentsException;
 import io.gitlab.icestom.icestom.instance.BoatedTrackInstance;
 import io.gitlab.icestom.icestom.instance.TrackInstance;
 import io.gitlab.icestom.icestom.leaderboard.LeaderboardParticipant;
@@ -17,9 +21,10 @@ import io.gitlab.icestom.icestom.timetrial.event.TimedLapCheckpointAdvancedEvent
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLap;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLapResult;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLapResultSource;
-import io.gitlab.icestom.icestom.track.TickMovement;
+import io.gitlab.icestom.icestom.track.PlayerMovement;
 import io.gitlab.icestom.icestom.track.Track;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
+import io.gitlab.icestom.icestom.track.library.TrackLibrary;
 import io.gitlab.icestom.icestom.ui.TickCountdown;
 import io.gitlab.icestom.icestom.ui.event.GenericErrorMessageEvent;
 import io.gitlab.icestom.icestom.ui.interfaces.InterfaceManager;
@@ -63,8 +68,8 @@ public class RaceStage extends BoatedTrackInstance implements EventStage, Partic
 
     private final String name;
 
-    public RaceStage(String stageName, Track track, int totalLaps, int totalPits) {
-        super(track);
+    protected RaceStage(String stageName, TrackLibrary.Ticket ticket, Track track, int totalLaps, int totalPits) {
+        super(ticket, track);
 
         this.name = stageName;
 
@@ -118,109 +123,111 @@ public class RaceStage extends BoatedTrackInstance implements EventStage, Partic
         if (laps <= 0) return CompletableFuture.failedFuture(new InvalidStageArgumentsException("'laps' is <= 0"));
         if (pits < 0) return CompletableFuture.failedFuture(new InvalidStageArgumentsException("'pits' is <= 0"));
 
-        return IceStom.getInstance().getTrackLibrary()
-                .loadTrack(track_id)
-                .thenCompose(trackOpt -> {
-                    if (trackOpt.isEmpty()) {
-                        return CompletableFuture.failedFuture(
-                                new InvalidStageArgumentsException(
-                                        "Track '" + track_id + "' doesn't exist"
-                                )
-                        );
-                    }
+        return CompletableFuture.supplyAsync(() -> {
+            Optional<TrackLibrary.Ticket> optionalTicket =
+                    IceStom.getInstance()
+                            .getTrackLibrary()
+                            .loadTrack(track_id);
 
-                    try {
-                        return CompletableFuture.completedFuture(
-                                new RaceStage(name, trackOpt.get(), laps, pits)
-                        );
-                    } catch (Throwable e) {
-                        return CompletableFuture.failedFuture(
-                                e
-                        );
-                    }
-                });
+            if (optionalTicket.isEmpty()) {
+                throw new InvalidStageArgumentsException(
+                        "Track '" + track_id + "' doesn't exist"
+                );
+            }
+
+            TrackLibrary.Ticket ticket = optionalTicket.get();
+
+            Track track = ticket.getTrack().join();
+
+            return new RaceStage(name, ticket, track, laps, pits);
+        });
     }
 
     @Override
-    protected void onPlayerMovements(Map<Player, TickMovement> movements, Map<Player, Set<String>> inside_regions, Map<Player, Map<String, Long>> crossed_triggers) {
-        Map<Integer, Map<Player, TickMovement>> grouped = new HashMap<>();
+    protected void handleMovements(List<TickLocation> movements) {
 
-        for (Map.Entry<Player, TickMovement> entry : movements.entrySet()) {
-            Player player = entry.getKey();
-            TickMovement movement = entry.getValue();
-
-            Set<String> playerRegions = inside_regions.get(player);
-            Map<String, Long> playerTriggers = crossed_triggers.get(player);
-
-            @Nullable EventParticipant participation = participants.getParticipantFromActivePlayer(player);
-
-            if (participation != null) {
-                RaceParticipant raceParticipant = racers.get(participation.getUuid());
-
-                if (raceParticipant == null || raceParticipant.isFinished()) continue;
-
-                grouped.computeIfAbsent(raceParticipant.getNextExpected(), _ -> new HashMap<>())
-                        .put(player, movement);
-
-                TimedLap timedLap = raceParticipant.getCurrentLap();
-
-                TrackInstance.tickResetRegions(this, player, playerRegions, playerTriggers, timedLap);
-            }
-        }
-
-        AtomicBoolean updated = new AtomicBoolean(false);
-
-        for (Map.Entry<Integer, Map<Player, TickMovement>> integerMapEntry : grouped.entrySet()) {
-            int checkpoint_index = integerMapEntry.getKey();
-
-            for (CrossCollider checkpoint : track.getCheckpoints(checkpoint_index)) {
-                Map<Player, Long> crosses = checkpoint.detectCrosses(integerMapEntry.getValue());
-
-                crosses.forEach((player, tick_delta) -> {
-                    @Nullable EventParticipant participation = participants.getParticipantFromActivePlayer(player);
-
-                    if (participation != null) {
-                        RaceParticipant raceParticipant = racers.get(participation.getUuid());
-
-                        if (raceParticipant == null || raceParticipant.isFinished()) return;
-
-                        Split split = new Split(
-                                getWorldAge() * 50,
-                                tick_delta,
-                                checkpoint_index
-                        );
-
-                        TimedLap last = raceParticipant.getCurrentLap();
-
-                        @Nullable TimedLap finished = raceParticipant.nextCheckpoint(split);
-
-                        MinecraftServer.getGlobalEventHandler()
-                                .call(new TimedLapCheckpointAdvancedEvent(last, player));
-
-                        if (finished != null) {
-                            MinecraftServer.getGlobalEventHandler()
-                                    .call(new RaceTimedLapCompletedEvent(participation, finished, this));
-
-                            if (raceParticipant.isFinished()) {
-                                MinecraftServer.getGlobalEventHandler()
-                                        .call(new RaceCompletedEvent(participation, this));
-
-                                if (raceState == RaceState.RACE) finishRace();
-                            }
-                        }
-
-                        raceLeaderboard.update(raceParticipant, split);
-                        updated.set(true);
-                    }
-                });
-            }
-        }
-
-        if (updated.get()) {
-            MinecraftServer.getGlobalEventHandler()
-                    .call(new RaceLeaderboardUpdateEvent(this));
-        }
     }
+//
+//    @Override
+//    protected void handleMovements(Map<Player, PlayerMovement> movements, Map<Player, Set<String>> inside_regions, Map<Player, Map<String, Long>> crossed_triggers) {
+//        Map<Integer, Map<Player, PlayerMovement>> grouped = new HashMap<>();
+//
+//        for (Map.Entry<Player, PlayerMovement> entry : movements.entrySet()) {
+//            Player player = entry.getKey();
+//            PlayerMovement movement = entry.getValue();
+//
+//            Set<String> playerRegions = inside_regions.get(player);
+//            Map<String, Long> playerTriggers = crossed_triggers.get(player);
+//
+//            @Nullable EventParticipant participation = participants.getParticipantFromActivePlayer(player);
+//
+//            if (participation != null) {
+//                RaceParticipant raceParticipant = racers.get(participation.getUuid());
+//
+//                if (raceParticipant == null || raceParticipant.isFinished()) continue;
+//
+//                grouped.computeIfAbsent(raceParticipant.getNextExpected(), _ -> new HashMap<>())
+//                        .put(player, movement);
+//
+//                TimedLap timedLap = raceParticipant.getCurrentLap();
+//
+//                TrackInstance.tickResetRegions(this, player, playerRegions, playerTriggers, timedLap);
+//            }
+//        }
+//
+//        AtomicBoolean updated = new AtomicBoolean(false);
+//
+//        for (Map.Entry<Integer, Map<Player, PlayerMovement>> integerMapEntry : grouped.entrySet()) {
+//            int checkpoint_index = integerMapEntry.getKey();
+//
+//            for (CrossCollider checkpoint : track.getCheckpoints(checkpoint_index)) {
+//                Map<Player, Long> crosses = checkpoint.detectCrosses(integerMapEntry.getValue());
+//
+//                crosses.forEach((player, tick_delta) -> {
+//                    @Nullable EventParticipant participation = participants.getParticipantFromActivePlayer(player);
+//
+//                    if (participation != null) {
+//                        RaceParticipant raceParticipant = racers.get(participation.getUuid());
+//
+//                        if (raceParticipant == null || raceParticipant.isFinished()) return;
+//
+//                        Split split = new Split(
+//                                getWorldAge() * 50,
+//                                tick_delta,
+//                                checkpoint_index
+//                        );
+//
+//                        TimedLap last = raceParticipant.getCurrentLap();
+//
+//                        @Nullable TimedLap finished = raceParticipant.nextCheckpoint(split);
+//
+//                        MinecraftServer.getGlobalEventHandler()
+//                                .call(new TimedLapCheckpointAdvancedEvent(last, player));
+//
+//                        if (finished != null) {
+//                            MinecraftServer.getGlobalEventHandler()
+//                                    .call(new RaceTimedLapCompletedEvent(participation, finished, this));
+//
+//                            if (raceParticipant.isFinished()) {
+//                                MinecraftServer.getGlobalEventHandler()
+//                                        .call(new RaceCompletedEvent(participation, this));
+//
+//                                if (raceState == RaceState.RACE) finishRace();
+//                            }
+//                        }
+//
+//                        raceLeaderboard.update(raceParticipant, split);
+//                        updated.set(true);
+//                    }
+//                });
+//            }
+//        }
+//
+//        if (updated.get()) {
+//            MinecraftServer.getGlobalEventHandler()
+//                    .call(new RaceLeaderboardUpdateEvent(this));
+//        }
+//    }
 
     @Override
     public void tick(long time) {
@@ -319,7 +326,7 @@ public class RaceStage extends BoatedTrackInstance implements EventStage, Partic
         }
 
         MinecraftServer.getInstanceManager()
-                .registerInstance(this);
+                .registerSharedInstance(this);
 
         EventStage.super.teleportAllParticipants(results);
 
@@ -424,6 +431,8 @@ public class RaceStage extends BoatedTrackInstance implements EventStage, Partic
     public void cleanup() {
         MinecraftServer.getInstanceManager()
                 .unregisterInstance(this);
+
+        getTicket().burn();
     }
 
     @Override

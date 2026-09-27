@@ -13,7 +13,9 @@ public abstract class Interface<H, I extends Interface<H, I>> {
 
     public Set<Player> getWatching() {
         return watching;
-    };
+    }
+
+    public abstract boolean supportsPlayer(Player player);
 
     public void startWatching(Player player) {
         watching.add(player);

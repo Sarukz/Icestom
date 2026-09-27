@@ -13,11 +13,12 @@ import io.gitlab.icestom.icestom.instance.TrackInstance;
 import io.gitlab.icestom.icestom.timetrial.event.*;
 import io.gitlab.icestom.icestom.timetrial.lap.TimeTrialResult;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLapResult;
+import io.gitlab.icestom.icestom.track.PlayerMovement;
 import io.gitlab.icestom.icestom.track.Track;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
-import io.gitlab.icestom.icestom.track.TickMovement;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLap;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLapResultSource;
+import io.gitlab.icestom.icestom.track.library.TrackLibrary;
 import io.gitlab.icestom.icestom.ui.interfaces.InterfaceManager;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -25,6 +26,7 @@ import net.kyori.adventure.text.format.Style;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.coordinate.Pos;
+import net.minestom.server.coordinate.Vec;
 import net.minestom.server.entity.GameMode;
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.item.ItemDropEvent;
@@ -62,8 +64,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
 
     private final InterfaceManager.InterfaceHolder interfaceHolder;
 
-    private final Map<Player, TimedLap> timeTrials = new HashMap<>();
-
+    private final Map<UUID, TimedLap> timeTrials = new HashMap<>();
     private final Map<UUID, Pos> practicePoints = new HashMap<>();
 
     private final ItemStack RESET_ITEM = ItemStack.of(Objects.requireNonNull(Material.fromKey(IceStomConfig.getConfig().icestom.reset_item)))
@@ -80,13 +81,15 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
 
     private final TimetrialLeaderboard leaderboard;
 
-    public TimeTrialingInstance(Track track) {
-        super(track);
+    private final Map<UUID, Vec> lastPosition = new HashMap<>();
+
+    public TimeTrialingInstance(TrackLibrary.Ticket ticket, Track track) {
+        super(ticket, track);
 
         eventNode().addListener(PlayerStartSneakingEvent.class, event -> {
             final Player player = event.getPlayer();
 
-            endTimeTrial(player);
+            endTimeTrial(player.getUuid());
             removeBoat(player);
         });
 
@@ -97,7 +100,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
             if (requested == GameMode.SURVIVAL) requested = GameMode.ADVENTURE;
             if (requested == GameMode.CREATIVE) requested = GameMode.ADVENTURE;
 
-            endTimeTrial(player);
+            endTimeTrial(player.getUuid());
             removeBoat(player);
 
             player.setGameMode(requested);
@@ -114,7 +117,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
             } else if (itemStack == PRACTICE_ITEM) {
                 @Nullable Pos practicePoint = practicePoints.get(player.getUuid());
 
-                endTimeTrial(player);
+                endTimeTrial(player.getUuid());
 
                 if (practicePoint != null) {
                     createBoat(player, practicePoint);
@@ -141,17 +144,13 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
                     MinecraftServer.getGlobalEventHandler()
                             .call(new TimeTrialPracticePointDeleteEvent(player, this));
                 } else {
-                    if (player.isOnGround()) {
-                        practicePoints.put(player.getUuid(), player.getPosition());
+                    if (!player.isOnGround()) return;
 
-                        MinecraftServer.getGlobalEventHandler()
-                                .call(new TimeTrialPracticePointCreateEvent(player, this));
-                    } else if (player.getVehicle() instanceof Boat boat) {
-                        practicePoints.put(player.getUuid(), boat.getPosition());
+                    Pos point = player.getVehicle() instanceof Boat boat ? boat.getPosition() : player.getPosition();
+                    practicePoints.put(player.getUuid(), point);
 
-                        MinecraftServer.getGlobalEventHandler()
-                                .call(new TimeTrialPracticePointCreateEvent(player, this));
-                    }
+                    MinecraftServer.getGlobalEventHandler()
+                            .call(new TimeTrialPracticePointCreateEvent(player, this));
                 }
             } else if (itemStack == SPAWN_ITEM) {
                 teleportToSpawn(player);
@@ -160,6 +159,9 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
 
         leaderboard = new TimetrialLeaderboard(track);
         interfaceHolder = getHolder(TimeTrialingInstance.class, this);
+
+        subscribeRegionId("icestom.reset");
+        subscribeTriggerId("icestom.reset");
     }
 
     @Override
@@ -171,15 +173,11 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
         return boat;
     }
 
-    @Override
-    public void start() {
+    public void initialize() {
         Pos leaderboard_pos = track.getLocations().getOrDefault(
                 "icestom.leaderboard",
                 track.getSpawnLocation().asVec().asPos() // remove pitch/yaw
         );
-
-        subscribeRegionId("icestom.reset");
-        subscribeTriggerId("icestom.reset");
 
         leaderboard.setInstance(this, leaderboard_pos);
     }
@@ -195,7 +193,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
         }
 
         for (Player player : getPlayers()) {
-            @Nullable TimedLap lap = timeTrials.get(player);
+            @Nullable TimedLap lap = timeTrials.get(player.getUuid());
 
             if (lap != null) {
                 MinecraftServer.getGlobalEventHandler()
@@ -205,76 +203,121 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
     }
 
     @Override
-    protected void onPlayerMovements(Map<Player, TickMovement> movements, Map<Player, Set<String>> inside_regions, Map<Player, Map<String, Long>> crossed_triggers) {
+    protected void handleMovements(List<TickLocation> movements) {
         if (movements.isEmpty()) return;
 
-        List<CrossCollider> initial_checkpoints = track.getCheckpoints(0);
+        Map<Integer, LinkedHashMap<UUID, ArrayDeque<TickLocation>>> pending = new HashMap<>();
+        ArrayDeque<Integer> checkpointQueue = new ArrayDeque<>();
 
-        Map<Player, TickMovement> not_started_tt = new HashMap<>();
+        for (TickLocation movement : movements) {
+            UUID player = movement.player();
 
-        for (Map.Entry<Player, TickMovement> entry : movements.entrySet()) {
-            Player player = entry.getKey();
-            TickMovement movement = entry.getValue();
+            int next_no = 0;
+            @Nullable TimedLap lap = getTimedLap(player);
+            if (lap != null) next_no = track.wrapCheckpointIndex(lap.getLastReachedCheckpoint() + 1);
 
-            Set<String> playerRegions = inside_regions.get(player);
-            Map<String, Long> playerTriggers = crossed_triggers.get(player);
+            pending.computeIfAbsent(next_no, _ -> new LinkedHashMap<>())
+                    .computeIfAbsent(player, _ -> new ArrayDeque<>())
+                    .add(movement);
 
-            @Nullable TimedLap timedLap = getTimedLap(player);
-
-            if (timedLap != null) {
-                int next_no = track.wrapCheckpointIndex(timedLap.getLastReachedCheckpoint() + 1);
-                Collection<CrossCollider> checkpoints = track.getCheckpoints(next_no);
-
-                for (CrossCollider checkpoint : checkpoints) {
-                    @Nullable Long tick_delta = checkpoint.detectCross(movement);
-
-                    if (tick_delta != null) {
-                        boolean finished = timedLap.advanceCheckpoint(new Split(
-                                getWorldAge() * 50,
-                                tick_delta,
-                                next_no
-                        ));
-
-                        MinecraftServer.getGlobalEventHandler()
-                                .call(new TimedLapCheckpointAdvancedEvent(timedLap, player));
-
-                        if (finished) {
-                            endTimeTrial(player);
-
-                            not_started_tt.put(player, movement);
-                        }
-                    }
-                }
-
-                TrackInstance.tickResetRegions(this, player, playerRegions, playerTriggers, timedLap);
-            } else {
-                not_started_tt.put(player, movement);
-            }
+            checkpointQueue.add(next_no);
         }
 
-        Set<Player> crossed = new HashSet<>();
+        Integer checkpoint;
+        while ((checkpoint = checkpointQueue.poll()) != null) {
+            LinkedHashMap<UUID, ArrayDeque<TickLocation>> bucket = pending.get(checkpoint);
+            if (bucket == null || bucket.isEmpty()) continue;
 
-        for (CrossCollider initialCheckpoint : initial_checkpoints) {
-            for (Map.Entry<Player, Long> entry : initialCheckpoint.detectCrosses(not_started_tt).entrySet()) {
-                Player player = entry.getKey();
+            LinkedHashMap<UUID, TickLocation> candidates = new LinkedHashMap<>();
+            for (Map.Entry<UUID, ArrayDeque<TickLocation>> e : bucket.entrySet()) {
+                TickLocation head = e.getValue().peek();
+                if (head != null) candidates.put(e.getKey(), head);
+            }
 
-                if (crossed.contains(player)) continue;
-                crossed.add(player);
+            if (candidates.isEmpty()) {
+                pending.remove(checkpoint);
+                continue;
+            }
 
-                long tick_delta = entry.getValue();
+            List<TickLocation> moves = new ArrayList<>(candidates.values());
+            List<Vec> old_locations = new ArrayList<>(moves.size());
+            for (TickLocation move : moves) {
+                old_locations.add(lastPosition.getOrDefault(move.player(), null));
+            }
 
-                @Nullable TimeTrialResult best_result = IceStom.getInstance().getTimetrialDatabase().getBestAttempt(player.getUuid(), track.getId());
+            Map<TickLocation, Long> hits = new HashMap<>();
+            for (CrossCollider trackCheckpoint : track.getCheckpoints(checkpoint)) {
+                for (Map.Entry<TickLocation, Long> hit : trackCheckpoint.detectCrosses(old_locations, moves).entrySet()) {
+                    hits.putIfAbsent(hit.getKey(), hit.getValue());
+                }
+            }
 
-                TimedLap timedLap = new TimedLap(track, best_result, new Split(
-                        getWorldAge() * 50,
-                        tick_delta,
-                        0
-                ));
+            for (Map.Entry<UUID, TickLocation> entry : candidates.entrySet()) {
+                UUID player = entry.getKey();
+                TickLocation location = entry.getValue();
 
-                MinecraftServer.getGlobalEventHandler()
-                        .call(new TimedLapCheckpointAdvancedEvent(timedLap, player));
+                ArrayDeque<TickLocation> playerQueue = bucket.get(player);
+                playerQueue.poll();
 
-                timeTrials.put(player, timedLap);
+                lastPosition.put(player, location.pos());
+
+                Long tick_delta = hits.get(location);
+
+                if (tick_delta == null) {
+                    if (playerQueue.isEmpty()) bucket.remove(player);
+                    continue;
+                }
+
+                bucket.remove(player);
+
+                int next_checkpoint;
+                @Nullable TimedLap lap = getTimedLap(player);
+
+                if (lap == null) {
+                    @Nullable TimeTrialResult best_result =
+                            IceStom.getInstance().getTimetrialDatabase().getBestAttempt(player, track.getId());
+
+                    TimedLap timedLap = new TimedLap(track, best_result, new Split(
+                            location.tick() * 50,
+                            tick_delta,
+                            0
+                    ));
+
+                    MinecraftServer.getGlobalEventHandler()
+                            .call(new TimedLapCheckpointAdvancedEvent(timedLap, Objects.requireNonNull(getPlayerByUuid(player))));
+
+                    timeTrials.put(player, timedLap);
+
+                    next_checkpoint = track.wrapCheckpointIndex(checkpoint + 1);
+                } else {
+                    boolean finished = lap.advanceCheckpoint(new Split(
+                            location.tick() * 50,
+                            tick_delta,
+                            checkpoint
+                    ));
+
+                    MinecraftServer.getGlobalEventHandler()
+                            .call(new TimedLapCheckpointAdvancedEvent(lap, Objects.requireNonNull(getPlayerByUuid(player))));
+
+                    if (finished) {
+                        endTimeTrial(player);
+                    }
+
+                    next_checkpoint = track.wrapCheckpointIndex(checkpoint + 1);
+                }
+
+                if (!playerQueue.isEmpty()) {
+                    LinkedHashMap<UUID, ArrayDeque<TickLocation>> nextBucket =
+                            pending.computeIfAbsent(next_checkpoint, _ -> new LinkedHashMap<>());
+                    nextBucket.put(player, playerQueue);
+                    checkpointQueue.add(next_checkpoint);
+                }
+            }
+
+            if (bucket.isEmpty()) {
+                pending.remove(checkpoint);
+            } else {
+                checkpointQueue.add(checkpoint);
             }
         }
     }
@@ -291,7 +334,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
 
     @Override
     public void resetPlayer(Player player) {
-        endTimeTrial(player);
+        endTimeTrial(player.getUuid());
         super.resetPlayer(player);
 
         player.sendPacket(nocol_packet);
@@ -305,12 +348,20 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
         inventory.setItemStack(8, SPAWN_ITEM);
     }
 
-    public @Nullable TimedLap getTimedLap(Player player) {
+    public @Nullable TimedLap getTimedLap(UUID player) {
         return timeTrials.get(player);
     }
 
-    public void endTimeTrial(Player player) {
+    public void endTimeTrial(UUID player) {
         @Nullable TimedLap timedLap = timeTrials.remove(player);
+
+        lastPosition.remove(player);
+
+        final Player player_instance = getPlayerByUuid(player);
+        if (player_instance == null) {
+            log.error("Unknown player: {}, this is probably bad", player);
+            return;
+        }
 
         if (timedLap != null) {
             TimetrialDatabase timetrialDatabase = IceStom.getInstance().getTimetrialDatabase();
@@ -319,7 +370,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
 
             if (result.splits().size() == 1) return;
 
-            @Nullable TimeTrialResult best = timetrialDatabase.getBestAttempt(player.getUuid(), track.getId());
+            @Nullable TimeTrialResult best = timetrialDatabase.getBestAttempt(player, track.getId());
 
             boolean is_first = best == null;
             boolean is_best_checkpoints = !is_first && result.splits().size() > best.splits().size();
@@ -330,14 +381,14 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
                 if (!bestRuns.isEmpty()) {
                     if (timedLap.getTime() < bestRuns.getFirst().getTime()) {
                         MinecraftServer.getGlobalEventHandler()
-                                .call(new TimeTrialNewRecordEvent(timedLap, player, this, result, bestRuns.getFirst()));
+                                .call(new TimeTrialNewRecordEvent(timedLap, player_instance, this, result, bestRuns.getFirst()));
                     }
                 }
-                IceStom.getInstance().getTimetrialDatabase().newAttempt(TimeTrialResult.fromResult(player.getUuid(), track.getId(), result));
+                IceStom.getInstance().getTimetrialDatabase().newAttempt(TimeTrialResult.fromResult(player, track.getId(), result));
             }
 
             MinecraftServer.getGlobalEventHandler()
-                    .call(new TimeTrialTimedLapEndedEvent(this, timedLap, player, best));
+                    .call(new TimeTrialTimedLapEndedEvent(this, timedLap, player_instance, best));
 
             leaderboard.updateLeaderboard();
         }
@@ -355,7 +406,7 @@ public class TimeTrialingInstance extends BoatedTrackInstance implements SpawnLo
     public void drop(Player player) {
         super.drop(player);
 
-        endTimeTrial(player);
+        endTimeTrial(player.getUuid());
 
         player.setGameMode(GameMode.ADVENTURE);
         player.setAllowFlying(false);

@@ -1,4 +1,3 @@
-
 package io.gitlab.icestom.icestom.ui.interfaces;
 
 import io.gitlab.icestom.icestom.race.RaceStage;
@@ -14,7 +13,7 @@ import java.lang.ref.WeakReference;
 
 public abstract class AbstractRaceInterface extends Interface<RaceStage, AbstractRaceInterface> implements EventHandler<Event> {
 
-    private final WeakReference<RaceStage> holder;
+    protected final WeakReference<RaceStage> holder;
     private final EventNode<Event> eventNode;
 
     public AbstractRaceInterface(RaceStage holder) {
@@ -28,7 +27,7 @@ public abstract class AbstractRaceInterface extends Interface<RaceStage, Abstrac
            }
 
             if (event instanceof PlayerEvent playerEvent) {
-                if (playerEvent.getPlayer().getInstance() != holder) return false;
+                return playerEvent.getPlayer().getInstance() == holder;
             }
 
             return true;

@@ -4,15 +4,16 @@ import io.gitlab.icestom.icestom.command.*;
 import io.gitlab.icestom.icestom.config.IceStomConfig;
 import io.gitlab.icestom.icestom.console.Console;
 import io.gitlab.icestom.icestom.database.TimetrialDatabase;
-import io.gitlab.icestom.icestom.database.memory.MemoryTimetrialDatabase;
+import io.gitlab.icestom.icestom.database.preference.PreferenceRegistry;
 import io.gitlab.icestom.icestom.database.sqlite.SQLiteTimetrialDatabase;
 import io.gitlab.icestom.icestom.debug.PerfHud;
 import io.gitlab.icestom.icestom.entity.Boat;
 import io.gitlab.icestom.icestom.entity.IceStomPlayer;
-import io.gitlab.icestom.icestom.event.EventManager;
-import io.gitlab.icestom.icestom.event.StageOption;
-import io.gitlab.icestom.icestom.event.StageRegistry;
-import io.gitlab.icestom.icestom.event.StageSchema;
+import io.gitlab.icestom.icestom.event.event.EventManager;
+import io.gitlab.icestom.icestom.event.stage.EventStage;
+import io.gitlab.icestom.icestom.event.stage.StageOption;
+import io.gitlab.icestom.icestom.event.stage.StageRegistry;
+import io.gitlab.icestom.icestom.event.stage.StageSchema;
 import io.gitlab.icestom.icestom.instance.PlayerHolder;
 import io.gitlab.icestom.icestom.instance.DefaultSpawnInstance;
 import io.gitlab.icestom.icestom.instance.SpawnInstance;
@@ -38,12 +39,14 @@ import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.EntityStatuses;
 import net.minestom.server.entity.GameMode;
 import net.minestom.server.entity.Player;
+import net.minestom.server.event.EventListener;
 import net.minestom.server.event.GlobalEventHandler;
 import net.minestom.server.event.player.*;
 import net.minestom.server.instance.*;
 import net.minestom.server.network.packet.server.play.EntityStatusPacket;
 import net.minestom.server.network.packet.server.play.EntityVelocityPacket;
 import net.minestom.server.network.packet.server.play.VehicleMovePacket;
+import net.minestom.server.timer.TaskSchedule;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,6 +55,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static io.gitlab.icestom.icestom.ui.interfaces.InterfaceManager.getHolder;
@@ -71,6 +75,7 @@ public class IceStom {
 
     private final PluginManager pluginManager;
 
+    private final PreferenceRegistry preferenceRegistry;
     private final TranslationManager translationManager;
     private final TrackLibrary trackLibrary;
     private final StageRegistry stageRegistry;
@@ -81,6 +86,8 @@ public class IceStom {
     private final Instance spawnInstance;
     private Supplier<SpawnInstance> spawnProvider = DefaultSpawnInstance::new;
 
+    private Function<Key, Boat> boatProvider = Boat::new;
+
     private final TimetrialDatabase timetrialDatabase;
 
     private final PerfHud perfHud = new PerfHud();
@@ -88,6 +95,8 @@ public class IceStom {
     private final SparkMinestom spark;
 
     private PanelServer panelServer;
+
+    private boolean registerDefaultInterface = true;
 
     static {
         Properties properties = new Properties();
@@ -136,6 +145,9 @@ public class IceStom {
         MinecraftServer.setBrandName(String.format("IceStom (%s)", MinecraftServer.getBrandName()));
         MinecraftServer.getConnectionManager().setPlayerProvider(IceStomPlayer::new);
 
+        preferenceRegistry = new PreferenceRegistry();
+        translationManager = new TranslationManager(getClass());
+
         trackLibrary = new TrackLibrary();
         trackLibrary.init();
 
@@ -161,14 +173,12 @@ public class IceStom {
                         StageOption.track("track", "Track", "Which track holds the podium locations")
                 ));
 
-        translationManager = new TranslationManager(getClass());
         timeTrialManager = new TimeTrialManager();
         openBoatUtilsManager = new OpenBoatUtilsManager();
 
         eventManager = new EventManager(Path.of("events"));
 
         timetrialDatabase = switch (config.database.type) {
-            case "memory" -> new MemoryTimetrialDatabase();
             case "sqlite" -> {
                 try {
                     yield new SQLiteTimetrialDatabase(Path.of("db"));
@@ -179,18 +189,19 @@ public class IceStom {
             default -> throw new RuntimeException("Unknown database type: " + config.database.type);
         };
 
-        InterfaceManager.register(TimeTrialingInstance.class, new VanillaInterface());
-        InterfaceManager.register(RaceStage.class, new VanillaInterface());
-        InterfaceManager.register(IceStom.class, new VanillaInterface());
-
-        interfaceHolder = getHolder(IceStom.class, this);
-
-        GlobalEventHandler globalEventHandler = MinecraftServer.getGlobalEventHandler();
-
         pluginManager = new PluginManager(Path.of("plugins"));
         pluginManager.loadPlugins();
 
+        if (registerDefaultInterface) {
+            InterfaceManager.register(TimeTrialingInstance.class, new VanillaInterface());
+            InterfaceManager.register(RaceStage.class, new VanillaInterface());
+            InterfaceManager.register(IceStom.class, new VanillaInterface());
+        }
+
+        GlobalEventHandler globalEventHandler = MinecraftServer.getGlobalEventHandler();
         globalEventHandler.addChild(pluginManager.eventNode());
+
+        interfaceHolder = getHolder(IceStom.class, this);
 
         globalEventHandler.addChild(openBoatUtilsManager.eventNode());
         globalEventHandler.addChild(perfHud.eventNode());
@@ -249,6 +260,10 @@ public class IceStom {
         commandManager.register(new StopCommand());
     }
 
+    public void setRegisterDefaultInterface(boolean registerDefaultInterface) {
+        this.registerDefaultInterface = registerDefaultInterface;
+    }
+
     @SuppressWarnings("UnstableApiUsage")
     public void startStandard() {
         CommandManager commandManager = MinecraftServer.getCommandManager();
@@ -271,6 +286,23 @@ public class IceStom {
         globalEventHandler.addListener(AsyncPlayerConfigurationEvent.class, event -> {
             final Player player = event.getPlayer();
 
+            EventStage stage = eventManager.findParticipatingStage(player);
+
+            if (stage != null) {
+                if (stage instanceof Instance is) {
+                    event.setSpawningInstance(is);
+
+                    player.eventNode().addListener(EventListener.builder(PlayerSpawnEvent.class)
+                            .expireCount(1)
+                            .handler(_ -> {
+                                stage.consume(player);
+                            })
+                            .build());
+                }
+
+                return;
+            }
+
             event.setSpawningInstance(spawnInstance);
             player.setRespawnPoint(((SpawnInstance) spawnInstance).spawnLocation(player));
         });
@@ -290,34 +322,30 @@ public class IceStom {
         consoleThread.setDaemon(true);
         consoleThread.start();
 
-
         MinecraftServer.getSchedulerManager().buildShutdownTask(console::stop);
         MinecraftServer.getSchedulerManager().buildShutdownTask(spark::shutdown);
+        MinecraftServer.getSchedulerManager().scheduleTask(timeTrialManager::cullDeadTimetrialInstances, TaskSchedule.immediate(), TaskSchedule.tick(100));
     }
 
     public void setSpawnProvider(Supplier<SpawnInstance> spawnProvider) {
         this.spawnProvider = spawnProvider;
     }
 
+    public void setBoatProvider(Function<Key, Boat> boatProvider) {
+        this.boatProvider = boatProvider;
+    }
+
+    public Function<Key, Boat> getBoatProvider() { return boatProvider; }
+
     public TrackLibrary getTrackLibrary() { return trackLibrary; }
-
     public TimeTrialManager getTimeTrialManager() { return timeTrialManager; }
-
     public StageRegistry getStageRegistry() { return stageRegistry; }
-
     public TranslationManager getTranslationManager() { return translationManager; }
-
     public SpawnInstance getSpawnInstance() { return (SpawnInstance) spawnInstance; }
-
     public TimetrialDatabase getTimetrialDatabase() { return timetrialDatabase; }
-
-    public EventManager getEventManager() {
-        return eventManager;
-    }
-
-    public @Nullable PanelServer getPanelServer() {
-        return panelServer;
-    }
+    public EventManager getEventManager() { return eventManager; }
+    public PreferenceRegistry getPreferenceRegistry() { return preferenceRegistry; }
+    public @Nullable PanelServer getPanelServer() { return panelServer; }
 
     private void startPanel() {
         IceStomConfig.WebConfigSection web = IceStomConfig.getWebConfig();

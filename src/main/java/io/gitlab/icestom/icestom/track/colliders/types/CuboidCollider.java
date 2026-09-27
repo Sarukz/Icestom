@@ -1,6 +1,7 @@
 package io.gitlab.icestom.icestom.track.colliders.types;
 
-import io.gitlab.icestom.icestom.track.TickMovement;
+import io.gitlab.icestom.icestom.instance.TrackInstance;
+import io.gitlab.icestom.icestom.track.PlayerMovement;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
 import io.gitlab.icestom.icestom.track.colliders.InsideCollider;
 import net.minestom.server.coordinate.Vec;
@@ -18,9 +19,9 @@ public class CuboidCollider implements InsideCollider, CrossCollider {
     public Vec getA() { return a; }
     public Vec getB() { return b; }
 
-    public @Nullable Long detectCross(TickMovement movement) {
-        Vec before  = movement.before();
-        Vec current = movement.current();
+    @Override
+    public @Nullable Long detectCross(Vec before, TrackInstance.TickLocation now) {
+        Vec current = now.pos();
 
         if (before == null) return null;
         if (isInside(before)) return null;
@@ -54,7 +55,7 @@ public class CuboidCollider implements InsideCollider, CrossCollider {
     }
 
     @Override
-    public boolean detectInside(TickMovement movement) {
+    public boolean detectInside(PlayerMovement movement) {
         return isInside(movement.current());
     }
 

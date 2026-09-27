@@ -61,9 +61,11 @@ public class TimetrialLeaderboard extends Entity {
             if (!username.isDone()) {
                 username.thenRun(this::updateLeaderboard);
                 return;
-            };
+            }
 
-            final String name = username.join();
+            String name = username.join();
+
+            if (name == null) name = "<unknown>";
 
             leaderboard.appendNewline();
             leaderboard.append(Component.object(ObjectContents.playerHead(attempt.player())));

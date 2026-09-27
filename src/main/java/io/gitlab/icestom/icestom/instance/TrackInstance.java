@@ -4,42 +4,48 @@ import io.github.openboatutils.protocol.OBUPacket;
 import io.github.openboatutils.protocol.channels.OBUContextPacket;
 import io.github.openboatutils.protocol.channels.OBUSettingsPacket;
 import io.gitlab.icestom.icestom.IceStom;
+import io.gitlab.icestom.icestom.entity.Boat;
 import io.gitlab.icestom.icestom.entity.IceStomPlayer;
 import io.gitlab.icestom.icestom.timetrial.lap.TimedLap;
 import io.gitlab.icestom.icestom.track.Track;
-import io.gitlab.icestom.icestom.track.TickMovement;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
 import io.gitlab.icestom.icestom.track.colliders.InsideCollider;
-import io.gitlab.icestom.stomtrack.EnvironmentFile;
-import net.hollowcube.polar.PolarLoader;
-import net.kyori.adventure.key.Key;
+import io.gitlab.icestom.icestom.track.library.TrackLibrary;
+import io.gitlab.icestom.icestom.util.BatchQueue;
+import net.kyori.adventure.nbt.ListBinaryTag;
 import net.kyori.adventure.text.Component;
-import net.minestom.server.MinecraftServer;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.coordinate.Vec;
+import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
-import net.minestom.server.event.item.ItemDropEvent;
+import net.minestom.server.event.instance.InstanceRegisterEvent;
 import net.minestom.server.event.player.PlayerBlockBreakEvent;
 import net.minestom.server.event.player.PlayerBlockPlaceEvent;
+import net.minestom.server.event.player.PlayerPacketEvent;
 import net.minestom.server.instance.LightingChunk;
-import net.minestom.server.registry.DynamicRegistry;
-import net.minestom.server.registry.RegistryKey;
-import net.minestom.server.world.DimensionType;
-import org.jetbrains.annotations.Nullable;
+import net.minestom.server.network.packet.client.play.ClientVehicleMovePacket;
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static io.gitlab.icestom.icestom.openboatutils.OpenBoatUtilsManager.writePacket;
+import static io.gitlab.icestom.icestom.util.DisplayEntityConverter.*;
 
 @SuppressWarnings("UnstableApiUsage")
 public abstract class TrackInstance extends BoatInstance implements SpawnLocation {
 
     private static final Logger log = LoggerFactory.getLogger(TrackInstance.class);
+
     protected final Track track;
-    private final Map<Player, Vec> lastTickPositions = new HashMap<>();
+    private final TrackLibrary.Ticket ticket;
+
+    private final BatchQueue<TickLocation> movementBatchQueue = new BatchQueue<>();
+    private final Map<UUID, Vec> lastTickPositions = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> ticks = new ConcurrentHashMap<>();
 
     private final Set<String> subscribedRegions = new HashSet<>();
     private final Set<String> subscribedTriggers = new HashSet<>();
@@ -47,64 +53,80 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
     private Set<InsideCollider> watchingRegions = Set.of();
     private Set<CrossCollider> watchingTriggers = Set.of();
 
-    private boolean defaultRegions = false;
+    protected TrackInstance(TrackLibrary.Ticket ticket, Track track) {
+        super(UUID.randomUUID(), track.getMapContainer());
 
-    public TrackInstance(Track track) {
-        super(Key.key(IceStom.NAMESPACE, "track/" + track.getEnvironmentId()), getDimensionKey(track.getEnvironmentData()));
-
+        this.ticket = ticket;
         this.track = track;
 
         setChunkSupplier(LightingChunk::new);
-        setChunkLoader(new PolarLoader(track.getWorld()));
 
         eventNode().addListener(PlayerBlockBreakEvent.class, event -> event.setCancelled(true));
         eventNode().addListener(PlayerBlockPlaceEvent.class, event -> event.setCancelled(true));
+
+        eventNode().addListener(InstanceRegisterEvent.class, event -> {
+            track.getMapContainer().onNewDisplayEntity(nbt -> {
+                String id = nbt.getString("id");
+
+                Entity entity = switch (id) {
+                    case "minecraft:block_display" -> loadBlockDisplay(nbt);
+                    case "minecraft:item_display" -> loadItemDisplay(nbt);
+                    case "minecraft:text_display" -> loadTextDisplay(nbt);
+                    default -> null;
+                };
+
+                if (entity == null) return;
+
+                ListBinaryTag pos = nbt.getList("Pos");
+
+                double x = pos.getDouble(0);
+                double y = pos.getDouble(1);
+                double z = pos.getDouble(2);
+
+                entity.setInstance(this, new Pos(x, y, z));
+            });
+        });
+
+        eventNode().addListener(PlayerPacketEvent.class, event -> {
+            final Player player = event.getPlayer();
+
+            if (!shouldTrackPlayer(player)) return;
+            if(!(player.getVehicle() instanceof Boat)) return;
+            if (!(event.getPacket() instanceof ClientVehicleMovePacket(Pos position, boolean onGround))) return;
+
+            final UUID uuid = player.getUuid();
+
+            int tick = ticks.merge(uuid, 1, Integer::sum);
+
+            log.info("{} {}", player.getUsername(), tick);
+
+            movementBatchQueue.add(new TickLocation(
+                    player.getUuid(),
+                    tick,
+                    position.asVec(),
+                    position.yaw()
+            ));
+        });
+    }
+
+    @Override
+    public @NonNull String getDimensionName() {
+        return getInstanceContainer().getDimensionName();
+    }
+
+    public long getPlayerTick(UUID player) {
+        return ticks.getOrDefault(player, 0);
     }
 
     @Override
     public void tick(long time) {
         super.tick(time);
 
-        Map<Player, TickMovement> movementMap = new HashMap<>();
+        if (!movementBatchQueue.isEmpty()) {
+            List<TickLocation> movements = movementBatchQueue.drain();
 
-        for (Player player : getPlayers()) {
-            if (!shouldTrackPlayer(player)) {
-                lastTickPositions.remove(player);
-                continue;
-            }
-
-            Vec current = player.getPosition().asVec();
-            @Nullable Vec last = lastTickPositions.get(player);
-
-            movementMap.put(player, new TickMovement(last, current));
-
-            lastTickPositions.put(player, current);
+            handleMovements(movements);
         }
-
-        Map<Player, Set<String>> inside_tags = new HashMap<>();
-        Map<Player, Map<String, Long>> crossed_triggers = new HashMap<>();
-
-        // TODO: can probably micro-optimise this by avoiding redundant checks on region tags a player is already in
-
-        var regions = track.getRegions();
-        for (InsideCollider watchingRegion : watchingRegions) {
-            for (Player player : watchingRegion.detectInside(movementMap)) {
-                inside_tags.computeIfAbsent(player, _ -> new HashSet<>()).addAll(regions.get(watchingRegion));
-            }
-        }
-
-        var triggers = track.getTriggers();
-        for (CrossCollider watchingTrigger : watchingTriggers) {
-            watchingTrigger.detectCrosses(movementMap).forEach((player, delta) -> {
-                Map<String, Long> crosses = crossed_triggers.computeIfAbsent(player, _ -> new HashMap<>());
-
-                triggers.get(watchingTrigger).forEach(string -> {
-                    crosses.put(string, delta);
-                });
-            });
-        }
-
-        onPlayerMovements(movementMap, inside_tags, crossed_triggers);
     }
 
     @Override
@@ -138,8 +160,12 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
         } catch (IOException _) {}
     }
 
-    protected abstract void onPlayerMovements(Map<Player, TickMovement> movements, Map<Player, Set<String>> inside_tags, Map<Player, Map<String, Long>> crossed_triggers);
+    protected abstract void handleMovements(List<TickLocation> movements);
     protected abstract boolean shouldTrackPlayer(Player player);
+
+    public TrackLibrary.Ticket getTicket() {
+        return ticket;
+    }
 
     public Track getTrack() {
         return track;
@@ -195,46 +221,6 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
         return removed;
     }
 
-    public static RegistryKey<DimensionType> getDimensionKey(EnvironmentFile environmentFile) {
-
-        DynamicRegistry<DimensionType> registry = MinecraftServer.getDimensionTypeRegistry();
-
-        String id = "d" + Objects.hash(
-                environmentFile.getAmbientLight(),
-                environmentFile.getHeight(),
-                environmentFile.getMinY(),
-                environmentFile.getHeight(),
-                environmentFile.getSkybox()
-        );
-
-        Key key = Key.key(IceStom.NAMESPACE, id);
-
-        @Nullable RegistryKey<DimensionType> pre_existing = registry.getKey(key);
-
-        if (pre_existing != null) return pre_existing;
-
-        DimensionType.Builder builder = DimensionType.builder();
-
-        builder.minY(environmentFile.getMinY());
-        builder.height(environmentFile.getHeight());
-        builder.logicalHeight(environmentFile.getHeight());
-        builder.skybox(switch (environmentFile.getSkybox()) {
-            case OVERWORLD -> DimensionType.Skybox.OVERWORLD;
-            case END -> DimensionType.Skybox.END;
-            case NONE -> DimensionType.Skybox.NONE;
-        });
-        builder.ambientLight(environmentFile.getAmbientLight());
-        builder.cardinalLight(environmentFile.getNetherLight() ? DimensionType.CardinalLight.NETHER : DimensionType.CardinalLight.DEFAULT);
-
-        try {
-            return MinecraftServer.getDimensionTypeRegistry()
-                    .register(key, builder.build());
-        } catch (UnsupportedOperationException e) {
-            log.warn("Couldn't find a suitable dimension type candidate for environment. (maybe preload failed?)");
-            return DimensionType.OVERWORLD;
-        }
-    }
-
     public static void tickResetRegions(
             TrackInstance instance,
             Player player,
@@ -252,4 +238,11 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
             instance.createBoat(player, reset_point);
         }
     }
+
+    public record TickLocation(
+            UUID player,
+            long tick,
+            Vec pos,
+            float yaw
+    ) {}
 }

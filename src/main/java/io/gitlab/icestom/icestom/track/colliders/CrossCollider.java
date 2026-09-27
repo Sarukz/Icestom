@@ -1,26 +1,30 @@
 package io.gitlab.icestom.icestom.track.colliders;
 
-import io.gitlab.icestom.icestom.track.TickMovement;
+import io.gitlab.icestom.icestom.instance.TrackInstance;
+import net.minestom.server.coordinate.Vec;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 public interface CrossCollider {
-    default <T> Map<T, Long> detectCrosses(Map<T, TickMovement> movements) {
-        Map<T, Long> deltas = new HashMap<>();
+    default Map<TrackInstance.TickLocation, Long> detectCrosses(List<Vec> before, SequencedCollection<TrackInstance.TickLocation> now) {
+        Map<TrackInstance.TickLocation, Long> deltas = new HashMap<>();
 
-        for (Map.Entry<T, TickMovement> entry : movements.entrySet()) {
-            @Nullable Long tick_delta = detectCross(entry.getValue());
+        int index = 0;
+        for (TrackInstance.TickLocation b : now) {
+            deltas.put(b, null);
+
+            @Nullable Vec a = before.get(index++);
+            @Nullable Long tick_delta = detectCross(a, b);
 
             if (tick_delta != null) {
-                deltas.put(entry.getKey(), tick_delta);
+                deltas.put(b, tick_delta);
             }
         }
 
         return deltas;
     }
 
-    @Nullable Long detectCross(TickMovement movement);
+    @Nullable Long detectCross(Vec before, TrackInstance.TickLocation now);
 }
 

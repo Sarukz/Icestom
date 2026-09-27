@@ -1,12 +1,12 @@
 package io.gitlab.icestom.icestom.track.colliders.types;
 
-import io.gitlab.icestom.icestom.track.TickMovement;
+import io.gitlab.icestom.icestom.instance.TrackInstance;
+import io.gitlab.icestom.icestom.track.PlayerMovement;
 import io.gitlab.icestom.icestom.track.colliders.CrossCollider;
 import net.minestom.server.coordinate.Vec;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 public class PlaneCollider implements CrossCollider {
 
@@ -42,11 +42,10 @@ public class PlaneCollider implements CrossCollider {
     public double getHeight() { return height; }
 
     @Override
-    public @Nullable Long detectCross(TickMovement movement) {
-        final Vec before = movement.before();
+    public @Nullable Long detectCross(@Nullable Vec before, TrackInstance.TickLocation currentLocation) {
         if (before == null) return null;
 
-        final Vec current = movement.current();
+        final Vec current = currentLocation.pos();
 
         final double nx = normal.x(), ny = normal.y(), nz = normal.z();
         final double ux = up.x(), uy = up.y(), uz = up.z();
@@ -93,8 +92,8 @@ public class PlaneCollider implements CrossCollider {
 
     // yes this is duplicated, it's faster to do it like this for a collection of movements
     @Override
-    public <T> Map<T, Long> detectCrosses(Map<T, TickMovement> movements) {
-        final Map<T, Long> crosses = new HashMap<>();
+    public Map<TrackInstance.TickLocation, Long> detectCrosses(List<Vec> oldList, SequencedCollection<TrackInstance.TickLocation> newList) {
+        final Map<TrackInstance.TickLocation, Long> crosses = new HashMap<>();
 
         final double nx = normal.x(), ny = normal.y(), nz = normal.z();
         final double ux = up.x(), uy = up.y(), uz = up.z();
@@ -103,11 +102,12 @@ public class PlaneCollider implements CrossCollider {
 
         final double halfHeight = height * 0.5;
 
-        for (Map.Entry<T, TickMovement> entry : movements.entrySet()) {
-            final Vec before = entry.getValue().before();
-            if (before == null) continue;
+        int index = 0;
+        for (final TrackInstance.TickLocation currentLocation : newList) {
+            final Vec before = oldList.get(index++);
+            final Vec current = currentLocation.pos();
 
-            final Vec current = entry.getValue().current();
+            if (before == null) continue;
 
             final double bx = before.x(), by = before.y(), bz = before.z();
             final double cx = current.x(), cy = current.y(), cz = current.z();
@@ -142,7 +142,7 @@ public class PlaneCollider implements CrossCollider {
                 if (hNum > -halfHeight * denom || hNum < halfHeight * denom) continue;
             }
 
-            crosses.put(entry.getKey(), (long) (50 * (d0 / denom)));
+            crosses.put(currentLocation, (long) (50 * (d0 / denom)));
         }
 
         return crosses;
