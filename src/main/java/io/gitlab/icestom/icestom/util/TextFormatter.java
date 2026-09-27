@@ -15,18 +15,31 @@ public class TextFormatter {
     private static final char[] ICESTOM_LOGO_CHAR = { '★', '◆', '●', '⬩', '·' };
     public static final int[] ICESTOM_LOGO_COLOR = { 0x9CC9FC, 0x84BBFB, 0x6BAEFA, 0x53A0F9, 0x3A93F8 };
 
+
     public static Component getTime(long ms) {
+        return getTime(ms, false);
+    }
+    public static Component getTime(long ms, boolean dp2) {
         long minutes = ms / (1000 * 60) % 60;
         double seconds = (ms % 60_000) / 1000.0;
 
+        String string;
+
         if (minutes > 0) {
-            return Component.text(String.format("%d:%s", minutes, DECIMAL_FORMAT.format(seconds)));
+            string = String.format("%d:%s", minutes, DECIMAL_FORMAT.format(seconds));
+        } else {
+            string = DECIMAL_FORMAT_NO_ZERO.format(seconds);
         }
-        return Component.text(DECIMAL_FORMAT_NO_ZERO.format(seconds));
+
+        if (dp2) {
+            return Component.text(string.substring(0, string.length() - 1));
+        }
+
+        return Component.text(string);
     }
 
     public static Component getTimeRounded(long ms) {
-        return getTime((long) (Math.ceil((double) ms / 50) * 50));
+        return getTime((long) (Math.ceil((double) ms / 50) * 50), true);
     }
 
     public static Component getDelta(long ms) {

@@ -76,9 +76,7 @@ public class TimedLap implements TimedLapResultSource {
     public Component getActionBar(long tick) {
         long time = Math.max(0, tick * 50 - getMsStart());
 
-        float t_seconds = (float) Math.ceil((float) time / 50) * 50 / 1000;
-
-        Component text = TextFormatter.getTime(time);
+        Component text = TextFormatter.getTimeRounded(time);
 
         if (bestPreviousResult != null) {
             if (lastReachedCheckpoint != 0) {

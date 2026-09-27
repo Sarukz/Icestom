@@ -98,8 +98,6 @@ public abstract class TrackInstance extends BoatInstance implements SpawnLocatio
 
             int tick = ticks.merge(uuid, 1, Integer::sum);
 
-            log.info("{} {}", player.getUsername(), tick);
-
             movementBatchQueue.add(new TickLocation(
                     player.getUuid(),
                     tick,
