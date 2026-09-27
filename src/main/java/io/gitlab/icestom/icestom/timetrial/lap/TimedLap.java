@@ -78,7 +78,7 @@ public class TimedLap implements TimedLapResultSource {
 
         float t_seconds = (float) Math.ceil((float) time / 50) * 50 / 1000;
 
-        Component text = Component.text(String.format("%.2f", t_seconds));
+        Component text = TextFormatter.getTime(time);
 
         if (bestPreviousResult != null) {
             if (lastReachedCheckpoint != 0) {
